@@ -5,26 +5,28 @@
 
 const KMB_BASE = "https://data.etabus.gov.hk/v1/transport/kmb";
 
-let allStops = [];
+let allStops = [];       // { stop, name_tc, name_en, lat, long }
+let allRoutes = [];      // { route, bound, service_type, orig_tc, dest_tc, ... }
 let selectedStop = null;
 let refreshTimer = null;
+let searchDebounce = null;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const stopSearchEl = document.getElementById("stopSearch");
-const searchBtnEl = document.getElementById("searchBtn");
+const searchBtnEl  = document.getElementById("searchBtn");
 const suggestionsEl = document.getElementById("suggestions");
-const stopInfoEl = document.getElementById("stopInfo");
-const stopNameEl = document.getElementById("stopName");
-const stopIdEl = document.getElementById("stopId");
+const stopInfoEl   = document.getElementById("stopInfo");
+const stopNameEl   = document.getElementById("stopName");
+const stopIdEl     = document.getElementById("stopId");
 const refreshBtnEl = document.getElementById("refreshBtn");
 const etaSectionEl = document.getElementById("etaSection");
-const etaListEl = document.getElementById("etaList");
-const loadingEl = document.getElementById("loading");
-const errorMsgEl = document.getElementById("errorMsg");
+const etaListEl    = document.getElementById("etaList");
+const loadingEl    = document.getElementById("loading");
+const errorMsgEl   = document.getElementById("errorMsg");
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  await loadStops();
+  await Promise.all([loadStops(), loadRoutes()]);
   bindEvents();
 }
 
@@ -41,49 +43,86 @@ async function loadStops() {
   }
 }
 
+async function loadRoutes() {
+  try {
+    const res = await fetch(`${KMB_BASE}/route`);
+    const json = await res.json();
+    allRoutes = json.data || [];
+  } catch (e) {
+    // non-fatal; route search will just be empty
+  }
+}
+
 // ── Events ────────────────────────────────────────────────────────────────────
 function bindEvents() {
   searchBtnEl.addEventListener("click", doSearch);
   stopSearchEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doSearch();
   });
-  stopSearchEl.addEventListener("input", onSearchInput);
+  stopSearchEl.addEventListener("input", () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(doSearch, 200);
+  });
   refreshBtnEl.addEventListener("click", () => loadETA(selectedStop));
 
-  // Close suggestions when clicking outside
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".search-section")) hideSuggestions();
   });
 }
 
-function onSearchInput() {
+async function doSearch() {
   const q = stopSearchEl.value.trim();
-  if (q.length < 1) {
-    hideSuggestions();
+  if (!q) { hideSuggestions(); return; }
+
+  // Detect if query looks like a route number (e.g. "87D", "1A", "296")
+  const isRouteQuery = /^\d/.test(q);
+
+  if (isRouteQuery) {
+    await searchByRoute(q);
+  } else {
+    const stops = filterStops(q).slice(0, 20);
+    renderStopSuggestions(stops);
+  }
+}
+
+// ── Route search ──────────────────────────────────────────────────────────────
+async function searchByRoute(query) {
+  const q = query.toUpperCase();
+
+  // Find matching route entries (exact or prefix match)
+  const matched = allRoutes.filter((r) => r.route.toUpperCase() === q);
+  if (!matched.length) {
+    // Fallback: prefix match
+    const prefix = allRoutes.filter((r) => r.route.toUpperCase().startsWith(q));
+    if (!prefix.length) {
+      renderStopSuggestions([]); // show "not found"
+      return;
+    }
+    // Show unique route numbers as secondary suggestions
+    renderRouteSuggestions(prefix);
     return;
   }
-  const results = filterStops(q).slice(0, 20);
-  renderSuggestions(results);
+
+  // Exact match — fetch stops for each direction
+  showLoading(true);
+  hideSuggestions();
+  try {
+    const fetches = matched.map((r) =>
+      fetch(`${KMB_BASE}/route-stop/${r.route}/${r.bound === "O" ? "outbound" : "inbound"}/${r.service_type}`)
+        .then((res) => res.json())
+        .then((json) => ({ route: r, stops: json.data || [] }))
+    );
+    const results = await Promise.all(fetches);
+    renderRouteStopSuggestions(results, q);
+  } catch (e) {
+    showError("無法取得路線資料，請稍後再試。");
+  } finally {
+    showLoading(false);
+  }
 }
 
-function doSearch() {
-  const q = stopSearchEl.value.trim();
-  if (!q) return;
-  const results = filterStops(q).slice(0, 20);
-  renderSuggestions(results);
-}
-
-function filterStops(query) {
-  const q = query.toLowerCase();
-  return allStops.filter(
-    (s) =>
-      (s.name_tc && s.name_tc.includes(query)) ||
-      (s.name_en && s.name_en.toLowerCase().includes(q))
-  );
-}
-
-// ── Suggestions ───────────────────────────────────────────────────────────────
-function renderSuggestions(stops) {
+// ── Suggestions rendering ─────────────────────────────────────────────────────
+function renderStopSuggestions(stops) {
   if (!stops.length) {
     suggestionsEl.innerHTML =
       '<div class="suggestion-item"><span class="stop-name-tc">找不到相關巴士站</span></div>';
@@ -100,7 +139,65 @@ function renderSuggestions(stops) {
     )
     .join("");
   suggestionsEl.classList.remove("hidden");
+  bindSuggestionClicks();
+}
 
+function renderRouteSuggestions(routes) {
+  const unique = [...new Map(routes.map((r) => [r.route, r])).values()].slice(0, 10);
+  suggestionsEl.innerHTML =
+    '<div class="suggestion-header">🚌 路線搜尋結果</div>' +
+    unique
+      .map(
+        (r) => `
+        <div class="suggestion-item" data-route="${r.route}">
+          <div class="stop-name-tc"><strong>${r.route}</strong></div>
+          <div class="stop-name-en">${r.orig_en || ""} → ${r.dest_en || ""}</div>
+        </div>`
+      )
+      .join("");
+  suggestionsEl.classList.remove("hidden");
+
+  suggestionsEl.querySelectorAll(".suggestion-item[data-route]").forEach((el) => {
+    el.addEventListener("click", () => {
+      stopSearchEl.value = el.dataset.route;
+      searchByRoute(el.dataset.route);
+    });
+  });
+}
+
+function renderRouteStopSuggestions(results, routeNum) {
+  if (!results.length || results.every((r) => !r.stops.length)) {
+    suggestionsEl.innerHTML =
+      '<div class="suggestion-item"><span class="stop-name-tc">找不到此路線的巴士站</span></div>';
+    suggestionsEl.classList.remove("hidden");
+    return;
+  }
+
+  const dirLabel = { O: "往 ", I: "回 " };
+  let html = "";
+
+  for (const { route, stops } of results) {
+    const dir = route.bound === "O" ? "outbound" : "inbound";
+    const dest = route.dest_tc || route.dest_en || "";
+    html += `<div class="suggestion-header">🚌 ${routeNum} ${dirLabel[route.bound] || ""}${dest}</div>`;
+    for (const rs of stops) {
+      const stopInfo = allStops.find((s) => s.stop === rs.stop);
+      const name_tc = stopInfo ? stopInfo.name_tc : rs.stop;
+      const name_en = stopInfo ? stopInfo.name_en : "";
+      html += `
+        <div class="suggestion-item" data-stop-id="${rs.stop}" data-seq="${rs.seq}">
+          <div class="stop-name-tc"><span class="seq-badge">${rs.seq}</span> ${name_tc}</div>
+          <div class="stop-name-en">${name_en}</div>
+        </div>`;
+    }
+  }
+
+  suggestionsEl.innerHTML = html;
+  suggestionsEl.classList.remove("hidden");
+  bindSuggestionClicks();
+}
+
+function bindSuggestionClicks() {
   suggestionsEl.querySelectorAll(".suggestion-item[data-stop-id]").forEach((el) => {
     el.addEventListener("click", () => {
       const stop = allStops.find((s) => s.stop === el.dataset.stopId);
@@ -113,6 +210,16 @@ function hideSuggestions() {
   suggestionsEl.classList.add("hidden");
 }
 
+// ── Stop filter (by name) ─────────────────────────────────────────────────────
+function filterStops(query) {
+  const q = query.toLowerCase();
+  return allStops.filter(
+    (s) =>
+      (s.name_tc && s.name_tc.includes(query)) ||
+      (s.name_en && s.name_en.toLowerCase().includes(q))
+  );
+}
+
 // ── Stop selection ────────────────────────────────────────────────────────────
 function selectStop(stop) {
   selectedStop = stop;
@@ -123,7 +230,6 @@ function selectStop(stop) {
   stopSearchEl.value = stop.name_tc;
   loadETA(stop);
 
-  // Auto-refresh every 30 seconds
   clearInterval(refreshTimer);
   refreshTimer = setInterval(() => loadETA(stop), 30000);
 }
