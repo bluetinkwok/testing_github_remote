@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KMB 巴士到站時間</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚌 KMB 巴士到站時間</h1>
+      <p class="subtitle">九龍巴士實時到站預報</p>
+    </header>
+
+    <section class="search-section">
+      <div class="search-box">
+        <input
+          type="text"
+          id="stopSearch"
+          placeholder="輸入巴士站名稱（例：旺角、銅鑼灣）"
+          autocomplete="off"
+        />
+        <button id="searchBtn">搜尋</button>
+      </div>
+      <div id="suggestions" class="suggestions hidden"></div>
+    </section>
+
+    <section id="stopInfo" class="stop-info hidden">
+      <h2 id="stopName"></h2>
+      <p id="stopId" class="stop-id"></p>
+      <button id="refreshBtn" class="refresh-btn">🔄 重新整理</button>
+    </section>
+
+    <section id="etaSection" class="eta-section hidden">
+      <div id="etaList"></div>
+    </section>
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p>載入中…</p>
+    </div>
+
+    <div id="errorMsg" class="error hidden"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
